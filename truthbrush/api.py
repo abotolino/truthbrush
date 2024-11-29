@@ -104,40 +104,47 @@ class Api:
                     sleep(backoff)
 
     def _get(self, url: str, params: dict = None) -> Any:
-        try:
-            resp = self._make_session().get(
-                API_BASE_URL + url,
-                params=params,
-                proxies=proxies,
-                impersonate="chrome123",
-                headers={
-                    "Authorization": "Bearer " + self.auth_id,
-                    "User-Agent": USER_AGENT,
-                },
-            )
-            
-            # Add this section to handle rate limiting
-            if resp.status_code == 429 or "cloudflare" in resp.text.lower():
-                wait_time = 60  # Start with a 60 second wait
-                logger.warning(f"Rate limited by Cloudflare. Waiting {wait_time} seconds...")
-                sleep(wait_time)
-                return self._get(url, params)  # Retry the request
+        base_wait = 60  # Start with 60 seconds
+        max_attempts = 5
+        attempt = 0
+        
+        while attempt < max_attempts:
+            try:
+                resp = self._make_session().get(
+                    API_BASE_URL + url,
+                    params=params,
+                    proxies=proxies,
+                    impersonate="chrome123",
+                    headers={
+                        "Authorization": "Bearer " + self.auth_id,
+                        "User-Agent": USER_AGENT,
+                    },
+                )
                 
-        except curl_cffi.curl.CurlError as e:
-            logger.error(f"Curl error: {e}")
-            return None
-    
-        # Will also sleep
-        self._check_ratelimit(resp)
-    
-        try:
-            r = resp.json()
-        except json.JSONDecodeError:
-            logger.error(f"Failed to decode JSON: {resp.text}")
-            # Instead of returning None, we should return an empty dict
-            r = {"error": "JSON decode error"}
-    
-        return r
+                if resp.status_code == 429 or "cloudflare" in resp.text.lower():
+                    wait_time = base_wait * (2 ** attempt)  # Exponential backoff
+                    jitter = random.uniform(-10, 10)  # Add some randomness
+                    total_wait = wait_time + jitter
+                    
+                    logger.warning(f"Rate limited by Cloudflare. Attempt {attempt + 1}/{max_attempts}. "
+                                 f"Waiting {total_wait:.1f} seconds...")
+                    sleep(total_wait)
+                    attempt += 1
+                    continue
+                    
+                # If we get here, request was successful
+                return resp.json()
+                    
+            except json.JSONDecodeError:
+                logger.error(f"Failed to decode JSON: {resp.text}")
+                return {"error": "JSON decode error"}
+                
+            except Exception as e:
+                logger.error(f"Request failed: {str(e)}")
+                return None
+                
+        logger.error("Max attempts reached, giving up")
+        return None
 
     def _get_paginated(self, url: str, params: dict = None, resume: str = None) -> Any:
         next_link = API_BASE_URL + url
