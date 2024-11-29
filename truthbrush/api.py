@@ -115,18 +115,28 @@ class Api:
                     "User-Agent": USER_AGENT,
                 },
             )
+            
+            # Add this section to handle rate limiting
+            if resp.status_code == 429 or "cloudflare" in resp.text.lower():
+                wait_time = 60  # Start with a 60 second wait
+                logger.warning(f"Rate limited by Cloudflare. Waiting {wait_time} seconds...")
+                sleep(wait_time)
+                return self._get(url, params)  # Retry the request
+                
         except curl_cffi.curl.CurlError as e:
             logger.error(f"Curl error: {e}")
-
+            return None
+    
         # Will also sleep
         self._check_ratelimit(resp)
-
+    
         try:
             r = resp.json()
         except json.JSONDecodeError:
             logger.error(f"Failed to decode JSON: {resp.text}")
-            r = None
-
+            # Instead of returning None, we should return an empty dict
+            r = {"error": "JSON decode error"}
+    
         return r
 
     def _get_paginated(self, url: str, params: dict = None, resume: str = None) -> Any:
@@ -366,86 +376,107 @@ class Api:
         replies=False,
         verbose=False,
         created_after: datetime = None,
-        created_before: datetime = None,  # Add new parameter
+        created_before: datetime = None,  # Add the new parameter
         since_id=None,
         pinned=False,
     ) -> List[dict]:
-        """Pull the given user's statuses within a specified date range.
-    
-        Params:
-            created_after : timezone aware datetime object - get posts created after this date
-            created_before: timezone aware datetime object - get posts created before this date
-            since_id : number or string
-    
-        Returns a list of posts in reverse chronological order,
-            or an empty list if not found.
-        """
+        """Pull statuses within a specified date range for a given user.
         
+        Args:
+            username: The username to pull statuses for
+            replies: Whether to include replies (default False)
+            verbose: Whether to print debug info (default False)
+            created_after: Only return statuses created after this datetime
+            created_before: Only return statuses created before this datetime
+            since_id: Only return statuses newer than this ID
+            pinned: Only return pinned statuses (default False)
+        
+        Returns:
+            A list of status dictionaries in reverse chronological order
+        """
         params = {}
         user_id = self.lookup(username)["id"]
         page_counter = 0
         keep_going = True
-        while keep_going:
+        retries = 0
+        max_retries = 3
+        
+        while keep_going and retries < max_retries:
             try:
+                # Build the URL based on parameters
                 url = f"/v1/accounts/{user_id}/statuses"
                 if pinned:
                     url += "?pinned=true&with_muted=true"
                 elif not replies:
                     url += "?exclude_replies=true"
+                    
                 if verbose:
                     logger.debug("--------------------------")
                     logger.debug(f"{url} {params}")
-                result = self._get(url, params=params)
-                page_counter += 1
-            except json.JSONDecodeError as e:
-                logger.error(f"Unable to pull user #{user_id}'s statuses': {e}")
-                break
-            except Exception as e:
-                logger.error(f"Misc. error while pulling statuses for {user_id}: {e}")
-                break
-    
-            if "error" in result:
-                logger.error(
-                    f"API returned an error while pulling user #{user_id}'s statuses: {result}"
-                )
-                break
-    
-            if len(result) == 0:
-                break
-    
-            if not isinstance(result, list):
-                logger.error(f"Result is not a list (it's a {type(result)}): {result}")
-    
-            posts = sorted(result, key=lambda k: k["id"], reverse=True)
-            params["max_id"] = posts[-1]["id"]
-    
-            if verbose:
-                logger.debug(f"PAGE: {page_counter}")
-    
-            if pinned:
-                keep_going = False
-    
-            for post in posts:
-                post["_pulled"] = datetime.now().isoformat()
-                post_at = date_parse.parse(post["created_at"]).replace(tzinfo=timezone.utc)
-                
-                # Check if post is within the desired date range
-                if created_after and post_at <= created_after:
-                    keep_going = False
-                    break
-                
-                # Add new check for created_before
-                if created_before and post_at >= created_before:
-                    continue  # Skip this post but keep checking others
                     
-                if since_id and post["id"] <= since_id:
-                    keep_going = False
+                # Make the API request
+                result = self._get(url, params=params)
+                
+                # Handle potential errors 
+                if result is None:
+                    logger.warning("Got None result, waiting 60 seconds before retry...")
+                    sleep(60)
+                    retries += 1
+                    continue
+                    
+                if isinstance(result, dict) and "error" in result:
+                    logger.error(f"API returned an error: {result}")
                     break
+    
+                if len(result) == 0:
+                    break
+    
+                if not isinstance(result, list):
+                    logger.error(f"Result is not a list (it's a {type(result)}): {result}")
+                    break
+    
+                # Sort posts in reverse chronological order
+                posts = sorted(result, key=lambda k: k["id"], reverse=True)
+                params["max_id"] = posts[-1]["id"]
     
                 if verbose:
-                    logger.debug(f"{post['id']} {post['created_at']}")
+                    logger.debug(f"PAGE: {page_counter}")
     
-                yield post
+                if pinned:
+                    keep_going = False
+    
+                # Process each post
+                for post in posts:
+                    post["_pulled"] = datetime.now().isoformat()
+                    post_at = date_parse.parse(post["created_at"]).replace(tzinfo=timezone.utc)
+                    
+                    # Check date range criteria
+                    if created_after and post_at <= created_after:
+                        keep_going = False
+                        break
+                    
+                    if created_before and post_at >= created_before:
+                        continue  # Skip this post but keep checking others
+                        
+                    if since_id and post["id"] <= since_id:
+                        keep_going = False
+                        break
+    
+                    if verbose:
+                        logger.debug(f"{post['id']} {post['created_at']}")
+    
+                    yield post
+                    
+                page_counter += 1
+                retries = 0  # Reset retry counter on successful request
+                
+            except Exception as e:
+                logger.error(f"Error pulling statuses: {str(e)}")
+                retries += 1
+                if retries < max_retries:
+                    sleep(60)  # Wait before retrying
+                else:
+                    break
 
     def get_auth_id(self, username: str, password: str) -> str:
         """Logs in to Truth account and returns the session token"""
