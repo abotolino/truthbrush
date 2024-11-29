@@ -358,19 +358,21 @@ class Api:
         replies=False,
         verbose=False,
         created_after: datetime = None,
+        created_before: datetime = None,  # Add new parameter
         since_id=None,
         pinned=False,
     ) -> List[dict]:
-        """Pull the given user's statuses.
-
+        """Pull the given user's statuses within a specified date range.
+    
         Params:
-            created_after : timezone aware datetime object
+            created_after : timezone aware datetime object - get posts created after this date
+            created_before: timezone aware datetime object - get posts created before this date
             since_id : number or string
-
+    
         Returns a list of posts in reverse chronological order,
             or an empty list if not found.
         """
-
+        
         params = {}
         user_id = self.lookup(username)["id"]
         page_counter = 0
@@ -393,50 +395,48 @@ class Api:
             except Exception as e:
                 logger.error(f"Misc. error while pulling statuses for {user_id}: {e}")
                 break
-
+    
             if "error" in result:
                 logger.error(
                     f"API returned an error while pulling user #{user_id}'s statuses: {result}"
                 )
                 break
-
+    
             if len(result) == 0:
                 break
-
+    
             if not isinstance(result, list):
                 logger.error(f"Result is not a list (it's a {type(result)}): {result}")
-
-            posts = sorted(
-                result, key=lambda k: k["id"], reverse=True
-            )  # reverse chronological order (recent first, older last)
-            params["max_id"] = posts[-1][
-                "id"
-            ]  # when pulling the next page, get posts before this (the oldest)
-
+    
+            posts = sorted(result, key=lambda k: k["id"], reverse=True)
+            params["max_id"] = posts[-1]["id"]
+    
             if verbose:
                 logger.debug(f"PAGE: {page_counter}")
-
-            if pinned:  # assume single page
+    
+            if pinned:
                 keep_going = False
-
+    
             for post in posts:
                 post["_pulled"] = datetime.now().isoformat()
-
-                # only keep posts created after the specified date
-                # exclude posts created before the specified date
-                # since the page is listed in reverse chronology, we don't need any remaining posts on this page either
-                post_at = date_parse.parse(post["created_at"]).replace(
-                    tzinfo=timezone.utc
-                )
-                if (created_after and post_at <= created_after) or (
-                    since_id and post["id"] <= since_id
-                ):
-                    keep_going = False  # stop the loop, request no more pages
-                    break  # do not yeild this post or remaining (older) posts on this page
-
+                post_at = date_parse.parse(post["created_at"]).replace(tzinfo=timezone.utc)
+                
+                # Check if post is within the desired date range
+                if created_after and post_at <= created_after:
+                    keep_going = False
+                    break
+                
+                # Add new check for created_before
+                if created_before and post_at >= created_before:
+                    continue  # Skip this post but keep checking others
+                    
+                if since_id and post["id"] <= since_id:
+                    keep_going = False
+                    break
+    
                 if verbose:
                     logger.debug(f"{post['id']} {post['created_at']}")
-
+    
                 yield post
 
     def get_auth_id(self, username: str, password: str) -> str:
