@@ -8,6 +8,7 @@ import json
 import logging
 import os
 from dotenv import load_dotenv
+import random
 
 load_dotenv()  # take environment variables from .env.
 
@@ -79,21 +80,28 @@ class Api:
             self.ratelimit_reset = date_parse.parse(
                 resp.headers.get("x-ratelimit-reset")
             )
-
-        if (
-            self.ratelimit_remaining is not None and self.ratelimit_remaining <= 50
-        ):  # We do 50 to be safe; their tracking is a bit stochastic... it can jump down quickly
-            now = datetime.utcnow().replace(tzinfo=timezone.utc)
-            time_to_sleep = (
-                self.ratelimit_reset.replace(tzinfo=timezone.utc) - now
-            ).total_seconds()
-            logger.warning(
-                f"Approaching rate limit; sleeping for {time_to_sleep} seconds..."
-            )
-            if time_to_sleep > 0:
-                sleep(time_to_sleep)
-            else:
-                sleep(10)
+    
+        # More conservative rate limiting
+        if self.ratelimit_remaining is not None:
+            if self.ratelimit_remaining <= 100:  # Increased threshold
+                now = datetime.utcnow().replace(tzinfo=timezone.utc)
+                time_to_sleep = (
+                    self.ratelimit_reset.replace(tzinfo=timezone.utc) - now
+                ).total_seconds()
+                
+                # Add some random jitter to avoid synchronized requests
+                time_to_sleep += random.uniform(1, 5)
+                
+                logger.warning(
+                    f"Approaching rate limit (remaining: {self.ratelimit_remaining}); sleeping for {time_to_sleep} seconds..."
+                )
+                if time_to_sleep > 0:
+                    sleep(time_to_sleep)
+                else:
+                    # If we hit the rate limit, use exponential backoff
+                    backoff = min(300, 10 * (100 - self.ratelimit_remaining))  # Max 5 minutes
+                    logger.warning(f"Rate limited, backing off for {backoff} seconds")
+                    sleep(backoff)
 
     def _get(self, url: str, params: dict = None) -> Any:
         try:
